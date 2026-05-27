@@ -119,7 +119,11 @@ node j01n.js send room.json me target-agent '{"text":"hello"}'
 node j01n.js send room.json me all '{"text":"hello"}'
 ```
 
-The issue is server-side validation — the server validates that every registered participant has a wrapped key in the message envelope. The fix likely involves re-syncing peer keys before each broadcast.
+The fix is in `utils/j01n-fixed.js` — instead of group encryption, it sends individual ECDH-encrypted DMs to each known peer:
+```bash
+# Use the fixed version:
+node utils/j01n-fixed.js send room.json me all '{"text":"hello"}'
+```
 
 ## 🔐 How it works
 
