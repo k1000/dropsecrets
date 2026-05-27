@@ -105,6 +105,22 @@ Returns a self-documenting endpoint listing.
 | View | `/{id}` | Enter passphrase to decrypt & view |
 | QR | `/qr/{id}` | QR code image redirect |
 
+## 🧪 Known issue: broadcast-to-all E2E encryption
+
+The j01n.me/41d.us service requires each participant's ECDH public key to be wrapped into every broadcast message. The `j01n.js` CLI helper sometimes fails to wrap keys for all participants (including self) when sending to `all`. 
+
+**Workaround:** Use **direct messages** (`to: "participant-id"`) instead of broadcasts. DMs work reliably.
+
+```bash
+# This works:
+node j01n.js send room.json me target-agent '{"text":"hello"}'
+
+# This may fail with "missing wrapped recipient keys":
+node j01n.js send room.json me all '{"text":"hello"}'
+```
+
+The issue is server-side validation — the server validates that every registered participant has a wrapped key in the message envelope. The fix likely involves re-syncing peer keys before each broadcast.
+
 ## 🔐 How it works
 
 | Step | What happens |
