@@ -173,7 +173,7 @@ async function createSecret() {
   btn.textContent = '⏳ Encrypting...';
 
   try {
-    const resp = await fetch('/create', {
+    const resp = await fetch('/api/secret', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ payload, passphrase, expiry_minutes: expiry })
@@ -343,25 +343,7 @@ export default {
     }
 
     try {
-      // POST /create
-      if (path === '/create' && request.method === 'POST') {
-        return await handleCreate(request, env, corsHeaders);
-      }
-
-      // GET /read/:id
-      if (path.startsWith('/read/') && request.method === 'GET') {
-        return await handleRead(path.slice(6), env, corsHeaders);
-      }
-
-      // POST /decrypt/:id
-      if (path.startsWith('/decrypt/') && request.method === 'POST') {
-        return await handleDecrypt(path.slice(9), request, env, corsHeaders);
-      }
-
-      // GET /qr/:id
-      if (path.startsWith('/qr/') && request.method === 'GET') {
-        return handleQR(path.slice(4), url);
-      }
+      // ── Human routes ──
 
       // GET / — create page
       if (path === '/' || path === '') {
@@ -370,15 +352,57 @@ export default {
         });
       }
 
-      // GET /:id — view page (only if looks like a valid ID)
+      // GET /:id — view page
       const id = path.slice(1);
-      if (/^[a-z0-9]{8,16}$/.test(id)) {
+      if (/^[a-z0-9]{8,16}$/.test(id) && !id.startsWith('api')) {
         return new Response(VIEW_PAGE, {
           headers: { 'Content-Type': 'text/html; charset=utf-8', ...corsHeaders }
         });
       }
 
-      return new Response('Not found', { status: 404, headers: corsHeaders });
+      // ── Bot API routes (prefixed with /api) ──
+
+      if (path === '/api/secret' && request.method === 'POST') {
+        return await handleCreate(request, env, url, corsHeaders);
+      }
+
+      if (path.startsWith('/api/secret/')) {
+        const secretId = path.slice(12);
+        if (!/^[a-z0-9]{8,16}$/.test(secretId)) {
+          return jsonResponse({ error: 'Invalid secret ID' }, 400, corsHeaders);
+        }
+        if (request.method === 'GET') {
+          return await handleRead(secretId, env, corsHeaders);
+        }
+        if (request.method === 'POST') {
+          return await handleDecrypt(secretId, request, env, corsHeaders);
+        }
+      }
+
+      // ── Legacy bot routes (backward compat) ──
+
+      if (path === '/create' && request.method === 'POST') {
+        return await handleCreate(request, env, url, corsHeaders);
+      }
+
+      if (path.startsWith('/read/') && request.method === 'GET') {
+        return await handleRead(path.slice(6), env, corsHeaders);
+      }
+
+      if (path.startsWith('/decrypt/') && request.method === 'POST') {
+        return await handleDecrypt(path.slice(9), request, env, corsHeaders);
+      }
+
+      if (path.startsWith('/qr/') && request.method === 'GET') {
+        return handleQR(path.slice(4), url);
+      }
+
+      // GET /api — show bot API reference
+      if (path === '/api' && request.method === 'GET') {
+        return handleAPIReference(url, corsHeaders);
+      }
+
+
     } catch (e) {
       return new Response(JSON.stringify({ error: e.message }), {
         status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -389,80 +413,144 @@ export default {
 
 // ─── Handlers ────────────────────────────────────────────────────
 
-async function handleCreate(request, env, corsHeaders) {
+function jsonResponse(data, status = 200, corsHeaders) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders }
+  });
+}
+
+async function handleCreate(request, env, url, corsHeaders) {
   const { payload, passphrase, expiry_minutes = 60 } = await request.json();
 
   if (!payload || !passphrase) {
-    return new Response(JSON.stringify({ error: 'Payload and passphrase required' }), {
-      status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
-    });
+    return jsonResponse({ error: 'Payload and passphrase required' }, 400, corsHeaders);
   }
   if (payload.length > 50000) {
-    return new Response(JSON.stringify({ error: 'Payload too large (max 50KB)' }), {
-      status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
-    });
-  }
-  if (passphrase.length < 1) {
-    return new Response(JSON.stringify({ error: 'Passphrase required' }), {
-      status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
-    });
+    return jsonResponse({ error: 'Payload too large (max 50KB)' }, 400, corsHeaders);
   }
 
   const id = generateId();
   const encrypted = await encrypt(payload, passphrase);
   const ttl = Math.min(Math.max(parseInt(expiry_minutes) || 60, 1), 1440) * 60;
+  const link = url.origin + '/' + id;
+  const qrUrl = url.origin + '/qr/' + id;
 
   await env.SECRETS_KV.put(id, encrypted, { expirationTtl: ttl });
 
-  return new Response(JSON.stringify({ id, expires_in_seconds: ttl }), {
-    headers: { 'Content-Type': 'application/json', ...corsHeaders }
-  });
+  return jsonResponse({
+    id,
+    link,
+    qr_url: qrUrl,
+    expires_in_seconds: ttl,
+    expires_in_minutes: Math.round(ttl / 60),
+    // Bot-friendly: provide the passphrase hint — share link + passphrase separately
+    hint: 'Send the link and qr_url to the recipient. Share the passphrase separately (not in the same channel).'
+  }, 200, corsHeaders);
 }
 
 async function handleRead(id, env, corsHeaders) {
   const encrypted = await env.SECRETS_KV.get(id);
   if (!encrypted) {
-    return new Response(JSON.stringify({ error: 'Secret not found or expired' }), {
-      status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders }
-    });
+    return jsonResponse({ error: 'Secret not found or expired' }, 404, corsHeaders);
   }
-  return new Response(JSON.stringify({ encrypted }), {
-    headers: { 'Content-Type': 'application/json', ...corsHeaders }
-  });
+  return jsonResponse({ id, encrypted, hint: 'Use POST /api/secret/' + id + ' with {"passphrase":"..."} to decrypt.' }, 200, corsHeaders);
 }
 
 async function handleDecrypt(id, request, env, corsHeaders) {
   const { passphrase } = await request.json();
   if (!passphrase) {
-    return new Response(JSON.stringify({ error: 'Passphrase required' }), {
-      status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders }
-    });
+    return jsonResponse({ error: 'Passphrase required' }, 400, corsHeaders);
   }
 
   const encrypted = await env.SECRETS_KV.get(id);
   if (!encrypted) {
-    return new Response(JSON.stringify({ error: 'Secret not found or expired' }), {
-      status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders }
-    });
+    return jsonResponse({ error: 'Secret not found or expired' }, 404, corsHeaders);
   }
 
   try {
     const plaintext = await decrypt(encrypted, passphrase);
     // Auto-destruct: delete after successful decryption
     await env.SECRETS_KV.delete(id);
-    return new Response(JSON.stringify({ plaintext }), {
-      headers: { 'Content-Type': 'application/json', ...corsHeaders }
-    });
+    return jsonResponse({ id, plaintext, destroyed: true }, 200, corsHeaders);
   } catch (e) {
-    return new Response(JSON.stringify({ error: 'Wrong passphrase' }), {
-      status: 403, headers: { 'Content-Type': 'application/json', ...corsHeaders }
-    });
+    return jsonResponse({ error: 'Wrong passphrase' }, 403, corsHeaders);
   }
 }
 
 function handleQR(id, url) {
   const link = url.origin + '/' + id;
-  // Use a free QR code API
   const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(link)}`;
   return Response.redirect(qrUrl, 302);
+}
+
+function handleAPIReference(baseUrl, corsHeaders) {
+  const api = {
+    service: 'DropSecrets',
+    version: '1.0.0',
+    description: 'Ephemeral encrypted secret sharing for humans and bots',
+    encryption: 'AES-256-GCM + PBKDF2 (600K iterations)',
+    storage: 'Cloudflare Workers KV with TTL expiry',
+    auto_destruct: 'Secret is deleted from server after successful decryption',
+    base_url: baseUrl.origin,
+    endpoints: [
+      {
+        method: 'POST',
+        path: '/api/secret',
+        description: 'Create an encrypted secret',
+        request_body: {
+          payload: 'string (required) — the secret message (max 50KB)',
+          passphrase: 'string (required) — passphrase to encrypt/decrypt',
+          expiry_minutes: 'number (optional, default 60, min 1, max 1440)'
+        },
+        response: {
+          id: 'string — unique secret ID',
+          link: 'string — full URL to view the secret',
+          qr_url: 'string — QR code image URL',
+          expires_in_seconds: 'number — TTL'
+        },
+        example: `curl -X POST ${baseUrl.origin}/api/secret \\
+  -H "Content-Type: application/json" \\
+  -d '{"payload":"Hello agent!","passphrase":"hunter2","expiry_minutes":60}'`
+      },
+      {
+        method: 'GET',
+        path: '/api/secret/{id}',
+        description: 'Read encrypted blob (does NOT destroy)',
+        response: {
+          id: 'string',
+          encrypted: 'string (base64) — AES-256-GCM encrypted payload'
+        }
+      },
+      {
+        method: 'POST',
+        path: '/api/secret/{id}',
+        description: 'Decrypt and retrieve secret (DESTROYS after success)',
+        request_body: {
+          passphrase: 'string (required) — the passphrase used during creation'
+        },
+        response: {
+          id: 'string',
+          plaintext: 'string — the decrypted secret',
+          destroyed: 'boolean — always true'
+        },
+        example: `curl -X POST ${baseUrl.origin}/api/secret/abc123def456 \\
+  -H "Content-Type: application/json" \\
+  -d '{"passphrase":"hunter2"}'`
+      }
+    ],
+    // Legacy endpoints (backward compatible):
+    legacy_endpoints: [
+      { method: 'POST', path: '/create', same_as: 'POST /api/secret' },
+      { method: 'GET', path: '/read/{id}', same_as: 'GET /api/secret/{id}' },
+      { method: 'POST', path: '/decrypt/{id}', same_as: 'POST /api/secret/{id}' },
+      { method: 'GET', path: '/qr/{id}', description: 'Redirect to QR code image' }
+    ],
+    // Human pages:
+    pages: [
+      { path: '/', description: 'Create page (human)' },
+      { path: '/{id}', description: 'View page (human)' }
+    ]
+  };
+  return jsonResponse(api, 200, corsHeaders);
 }
