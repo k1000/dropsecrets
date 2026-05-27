@@ -1,0 +1,14 @@
+{
+  "name": "dropsecrets",
+  "version": "1.0.0",
+  "description": "Ephemeral encrypted secret sharing on Cloudflare Workers",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "kv:create": "wrangler kv:namespace create SECRETS_KV"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
