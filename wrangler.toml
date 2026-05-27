@@ -3,7 +3,9 @@ main = "src/index.js"
 compatibility_date = "2025-01-01"
 
 # KV namespace for storing encrypted secrets
-# Create it first: npx wrangler kv:namespace create SECRETS_KV
+# Create it first:
+#   npx wrangler kv:namespace create SECRETS_KV
+# Then paste the returned ID below
 kv_namespaces = [
   { binding = "SECRETS_KV", id = "YOUR_KV_ID_HERE" }
 ]
